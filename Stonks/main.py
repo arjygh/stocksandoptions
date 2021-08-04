@@ -6,7 +6,7 @@ from QuantConnect.Algorithm import QCAlgorithm
 from QuantConnect.Indicators import *
 
 ALL_UNIVERSE = True
-VOL_CUTOFF = 2000000
+VOL_CUTOFF = 5000000
 CBI_CUTOFF = 0.5
 VOL_TREND_DAYS = 7
 RSI_TREND_DAYS = 7
@@ -17,13 +17,13 @@ RSI_HI = 75.0
 D_SLOW_LOW = 10.0
 D_SLOW_HI = 50.0
 EACH_TRADE_AMT = 10000
-STARTING_CASH = 100*EACH_TRADE_AMT
 
 class Stonks(QCAlgorithm):
     def Initialize(self):
             self.SetStartDate(2015, 1, 1)
-            self.SetEndDate(2017, 12, 31)
-            self.SetCash(STARTING_CASH)
+            self.SetEndDate(2018, 12, 31)
+            self.InitCash = 100*EACH_TRADE_AMT
+            self.SetCash(self.InitCash)
             self.UniverseSettings.Resolution = Resolution.Daily
             self.indicators = { }
             if ALL_UNIVERSE:
@@ -35,8 +35,14 @@ class Stonks(QCAlgorithm):
             self.AddEquity("SPY", Resolution.Daily)
 
             self.SetBenchmark("SPY")
+            
+            self.MKT = self.AddEquity("SPY", Resolution.Daily).Symbol
+            self.mkt = []
+            self.order_tracker = {}
+        
             # Warm-up the indicator with bar count
             self.SetWarmUp(28, Resolution.Daily)
+        
 
         
     def CoarseSelectionFunction(self, universe):
@@ -81,13 +87,10 @@ class Stonks(QCAlgorithm):
                 self.Debug(f"Buying {symbol} at price {self.Securities[symbol].Close}")
                 # Sell some amount of SPY
                 spy_qty = min(int(EACH_TRADE_AMT/self.Securities["SPY"].Close), self.Portfolio["SPY"].Quantity)
-                self.MarketOrder("SPY", -1*spy_qty, False, f"Selling SPY for {symbol}")
-                sym_qty = int(min(EACH_TRADE_AMT, self.Portfolio.Cash)/(self.Securities[symbol].Close * 1.2))
-                self.MarketOrder(symbol, 1)
-                # self.StopMarketOrder(symbol, -1, 0.95 * self.Securities[symbol].Close, True)
-            # If invested, and if sell signal is true, and if current price is more than avg buying price
-            elif self.Portfolio[symbol].Invested and sd.should_sell() \
-                and self.Securities[symbol].Close > self.Portfolio[symbol].AveragePrice:
+                market_ticket = self.MarketOrder("SPY", -1*spy_qty, False, f"Selling SPY for {symbol}")
+                self.order_tracker[market_ticket.OrderId] = symbol
+            # If invested, and if sell signal is true
+            elif self.Portfolio[symbol].Invested and sd.should_sell():
                 self.Debug(f"Selling {symbol}")
                 self.Liquidate(symbol)
                  # Buy some amount of SPY
@@ -96,7 +99,27 @@ class Stonks(QCAlgorithm):
                     self.MarketOrder("SPY", spy_qty, False, f"Buying SPY after selling {symbol}")
             else:
                 self.Log(f"Neither buy or sell {symbol}")
-            
+                
+    def OnEndOfDay(self, symbol):
+        if symbol != self.MKT:
+            return
+        mkt_price = self.History(self.MKT, 2, Resolution.Daily)['close'].unstack(level= 0).iloc[-1]
+        self.mkt.append(mkt_price)
+        mkt_perf = self.InitCash * self.mkt[-1] / self.mkt[0] 
+        self.Plot('Strategy Equity', self.MKT, mkt_perf)
+        
+    def OnOrderEvent(self, orderEvent):
+        order = self.Transactions.GetOrderById(orderEvent.OrderId)
+        if orderEvent.Status == OrderStatus.Filled:
+            self.Log("{0}: {1}: {2}".format(self.Time, order, orderEvent))
+            if orderEvent.OrderId not in self.order_tracker.keys():
+                return
+            symbol = self.order_tracker.pop(orderEvent.OrderId)
+            sd = self.indicators[symbol]
+            sym_qty = int(min(EACH_TRADE_AMT, self.Portfolio.Cash)/(self.Securities[symbol].Close * 1.2))
+            self.Debug(f"To sell {sym_qty}")
+            self.MarketOrder(symbol, sym_qty)
+            self.StopMarketOrder(symbol, -1 * sym_qty, sd.sma_200.Current.Value)
             
 class SelectionData():
     def __init__(self):
@@ -107,8 +130,9 @@ class SelectionData():
         self.rsi_rw = RollingWindow[float](RSI_TREND_DAYS)
         self.macd_div_rw = RollingWindow[float](MACD_DIV_TREND_DAYS)
         self.vol_rw = RollingWindow[float](VOL_TREND_DAYS)
+        self.sma_10 = SimpleMovingAverage(10)
+        self.sma_20 = SimpleMovingAverage(20)
         self.sma_50 = SimpleMovingAverage(50)
-        self.sma_100 = SimpleMovingAverage(100)
         self.sma_200 = SimpleMovingAverage(200)
         self.current_price = 0.0
     
@@ -163,8 +187,9 @@ class SelectionData():
         self.macd_div_rw.Add(self.macd.Current.Value - self.macd.Signal.Current.Value)
         self.d_slow_rw.Add(self.stoch.StochD.Current.Value)
         self.vol_rw.Add(bar.Volume)
+        self.sma_10.Update(bar.EndTime, bar.Close)
+        self.sma_20.Update(bar.EndTime, bar.Close)
         self.sma_50.Update(bar.EndTime, bar.Close)
-        self.sma_100.Update(bar.EndTime, bar.Close)
         self.sma_200.Update(bar.EndTime, bar.Close)
         self.current_price = bar.Close
         
@@ -175,15 +200,16 @@ class SelectionData():
     def should_buy(self):
         CBI_CUTOFF = 1.0
         macd_div = self.macd.Current.Value - self.macd.Signal.Current.Value
-        filtered = self.Avg_Volume > VOL_CUTOFF and self.rsi.Current.Value > RSI_LOW and self.rsi.Current.Value < RSI_HI \
-            and self.RSI_slope > 0 and macd_div < 0 and self.MACD_Div_slope > 0 and self.MACD_Div_int < 0 \
-            and self.sma_50.Current.Value > self.sma_100.Current.Value
+        filtered = self.Avg_Volume > VOL_CUTOFF and macd_div < 0 and self.MACD_Div_slope > 0 and self.MACD_Div_int < 0 \
+            and self.rsi.Current.Value > RSI_LOW and self.rsi.Current.Value < RSI_HI and self.RSI_slope > 0 \
+            and self.current_price > self.sma_20.Current.Value and self.sma_50.Current.Value > self.sma_200.Current.Value
         if not filtered:
             return False
         else:
-            return 0.5*((abs(self.stoch.StochD.Current.Value - 0.5*(D_SLOW_HI + D_SLOW_LOW))/(0.5*(D_SLOW_HI - D_SLOW_LOW))) \
-                + (macd_div/self.MACD_Div_int)) > CBI_CUTOFF
+            return (0.5*((abs(self.stoch.StochD.Current.Value - 0.5*(D_SLOW_HI + D_SLOW_LOW))/(0.5*(D_SLOW_HI - D_SLOW_LOW))) \
+                + (macd_div/self.MACD_Div_int)) > CBI_CUTOFF)
 
     def should_sell(self):
-        return self.RSI_slope <= 0 and self.MACD_Div_slope <= 0 and self.MACD_Div_int >= 0 \
-            and self.stoch.StochD.Current.Value >= 50
+        return (self.sma_10.Current.Value < self.sma_50.Current.Value)
+        # self.MACD_Div_slope <= 0 and self.MACD_Div_int >= 0 \
+        # and self.stoch.StochD.Current.Value >= 50 and self.RSI_slope <= 0 

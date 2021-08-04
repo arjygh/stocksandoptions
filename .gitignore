@@ -1,6 +1,7 @@
 .vscode/
 .ipynb_checkpoints/*
 qc/Stonks/backtests/*
-qc/Stonks/.idea
+qc/Stonks/.idea/*
+Stonks/.idea/*
 qc/data
 qc/lean.json
