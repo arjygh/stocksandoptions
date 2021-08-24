@@ -21,7 +21,7 @@ EACH_TRADE_AMT = 10000
 class Stonks(QCAlgorithm):
     def Initialize(self):
             self.SetStartDate(2015, 1, 1)
-            self.SetEndDate(2018, 12, 31)
+            self.SetEndDate(2016, 5, 31)
             self.InitCash = 100*EACH_TRADE_AMT
             self.SetCash(self.InitCash)
             self.UniverseSettings.Resolution = Resolution.Daily
@@ -40,9 +40,9 @@ class Stonks(QCAlgorithm):
             self.mkt = []
             self.order_tracker = {}
         
-            # Warm-up the indicator with bar count
-            self.SetWarmUp(28, Resolution.Daily)
-        
+            # Warm-up the indicator with 200 days of data
+            self.SetWarmUp(timedelta(200), Resolution.Daily)
+            
 
         
     def CoarseSelectionFunction(self, universe):
@@ -87,7 +87,7 @@ class Stonks(QCAlgorithm):
                 self.Debug(f"Buying {symbol} at price {self.Securities[symbol].Close}")
                 # Sell some amount of SPY
                 spy_qty = min(int(EACH_TRADE_AMT/self.Securities["SPY"].Close), self.Portfolio["SPY"].Quantity)
-                market_ticket = self.MarketOrder("SPY", -1*spy_qty, False, f"Selling SPY for {symbol}")
+                market_ticket = self.MarketOrder("SPY", -1*spy_qty, True, f"Selling {spy_qty} SPY for {symbol}")
                 self.order_tracker[market_ticket.OrderId] = symbol
             # If invested, and if sell signal is true
             elif self.Portfolio[symbol].Invested and sd.should_sell():
@@ -96,17 +96,21 @@ class Stonks(QCAlgorithm):
                  # Buy some amount of SPY
                 spy_qty = int(self.Portfolio.Cash/self.Securities["SPY"].Close)
                 if spy_qty >= 1:
-                    self.MarketOrder("SPY", spy_qty, False, f"Buying SPY after selling {symbol}")
+                    self.MarketOrder("SPY", spy_qty, True, f"Buying {spy_qty} SPY after selling {symbol}")
             else:
                 self.Log(f"Neither buy or sell {symbol}")
                 
     def OnEndOfDay(self, symbol):
         if symbol != self.MKT:
             return
+        self.Debug(f"{self.Time} Cash: {self.Portfolio.Cash} TotalMarginUsed: {self.Portfolio.TotalMarginUsed} MarginRemaining: {self.Portfolio.MarginRemaining}")
         mkt_price = self.History(self.MKT, 2, Resolution.Daily)['close'].unstack(level= 0).iloc[-1]
         self.mkt.append(mkt_price)
         mkt_perf = self.InitCash * self.mkt[-1] / self.mkt[0] 
         self.Plot('Strategy Equity', self.MKT, mkt_perf)
+        self.Plot("Cash and Margin", "MarginRemaining", self.Portfolio.MarginRemaining)
+        self.Plot("Cash and Margin", "TotalMarginUsed", self.Portfolio.TotalMarginUsed)
+        self.Plot("Cash and Margin", "Cash", self.Portfolio.Cash)
         
     def OnOrderEvent(self, orderEvent):
         order = self.Transactions.GetOrderById(orderEvent.OrderId)
@@ -116,9 +120,8 @@ class Stonks(QCAlgorithm):
                 return
             symbol = self.order_tracker.pop(orderEvent.OrderId)
             sd = self.indicators[symbol]
-            sym_qty = int(min(EACH_TRADE_AMT, self.Portfolio.Cash)/(self.Securities[symbol].Close * 1.2))
-            self.Debug(f"To sell {sym_qty}")
-            self.MarketOrder(symbol, sym_qty)
+            sym_qty = int(min(EACH_TRADE_AMT, self.Portfolio.Cash)/(self.Securities[symbol].Close * 1.05))
+            self.MarketOrder(symbol, sym_qty, False, f"Buying {sym_qty} {symbol}")
             self.StopMarketOrder(symbol, -1 * sym_qty, sd.sma_200.Current.Value)
             
 class SelectionData():
